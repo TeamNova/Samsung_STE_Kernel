@@ -27,7 +27,9 @@
 static bool bln_enabled = true;
 static bool bln_ongoing = false; /* ongoing LED Notification */
 static int bln_blink_state = 0;
-static int bln_blink_mode = 1; /* blink by default */
+static bool bln_blink_mode = true; /* blink by default */
+static int bln_blinkon_delay = 1000; /* blink on with 1000msec delay by default */
+static int bln_blinkoff_delay = 1000; /* blink off with 1000msec delay by default */
 static bool bln_suspended = false; /* is system suspended */
 static struct bln_implementation *bln_imp = NULL;
 
@@ -124,9 +126,9 @@ static void blink_thread(void)
 	while(bln_suspended)
 	{
 		bln_enable_backlights(get_led_mask());
-		msleep(1000);
+		msleep(bln_blinkon_delay);
 		bln_disable_backlights(get_led_mask());
-		msleep(1000);
+		msleep(bln_blinkoff_delay);
 	}
 }
 
@@ -146,16 +148,17 @@ static void enable_led_notification(void)
 	* If we already have a blink thread going
 	* don't start another one.
 	*/
-	if(bln_ongoing & bln_blink_mode)
+	if (bln_ongoing & bln_blink_mode)
 		return;
 
 	bln_ongoing = true;
 
 	bln_power_on();
-	if(!bln_blink_mode)
+
+	if (unlikely(!bln_blink_mode))
 		bln_enable_backlights(get_led_mask());
 	else
-		kthread_run(&blink_thread, NULL,"bln_blink_thread");
+		kthread_run(&blink_thread, NULL, "bln_blink_thread");
 
 	pr_info("%s: notification led enabled\n", __FUNCTION__);
 }
@@ -439,6 +442,76 @@ static struct miscdevice bln_device = {
 	.name = "backlightnotification",
 };
 
+static ssize_t bln_blink_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+	sprintf(buf, "blink status: %s\n", bln_blink_mode ? "on" : "off");
+	sprintf(buf, "%sblink on delay: %d mscec\n", buf, bln_blinkon_delay);
+	sprintf(buf, "%sblink off delay: %d msec\n", buf, bln_blinkoff_delay);
+
+	return strlen(buf);
+}
+
+static ssize_t bln_blink_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
+{
+	int ret;
+	int delay_tmp;
+
+	if (!strncmp(buf, "on", 2)) {
+		bln_blink_mode = true;
+
+		pr_err("[BLN] BLN Blink Mode on\n");
+
+		return count;
+	}
+
+	if (!strncmp(buf, "off", 3)) {
+		bln_blink_mode = false;
+
+		pr_err("[BLN] BLN Blink Mode off\n");
+
+		return count;
+	}
+
+	if (!strncmp(&buf[0], "ondelay=", 8)) {
+		ret = sscanf(&buf[8], "%d", &delay_tmp);
+
+		if ((!ret) || (delay_tmp < 1)) {
+			pr_err("[BLN] invalid input - delay too short\n");
+			return -EINVAL;
+		}
+
+		bln_blinkon_delay = delay_tmp;
+
+		return count;
+	}
+
+	if (!strncmp(&buf[0], "offdelay=", 9)) {
+		ret = sscanf(&buf[9], "%d", &delay_tmp);
+
+		if ((!ret) || (delay_tmp < 1)) {
+			pr_err("[BLN] invalid input - delay too short\n");
+			return -EINVAL;
+		}
+
+		bln_blinkoff_delay = delay_tmp;
+
+		return count;
+	}
+}
+
+static struct kobj_attribute bln_blink_interface = __ATTR(blink_mode, 0644, bln_blink_show, bln_blink_store);
+
+static struct attribute *bln_attrs[] = {
+	&bln_blink_interface.attr,
+	NULL,
+};
+
+static struct attribute_group bln_interface_group = {
+	.attrs = bln_attrs,
+};
+
+static struct kobject *bln_kobject;
+
 /**
  *	register_bln_implementation	- register a bln implementation of a touchkey device device
  *	@imp: bln implementation structure
@@ -482,6 +555,18 @@ static int __init bln_control_init(void)
 		pr_err("Failed to create sysfs group for device (%s)!\n",
 				bln_device.name);
 		return 1;
+	}
+
+	bln_kobject = kobject_create_and_add("bln", kernel_kobj);
+
+	if (!bln_kobject) {
+		return -ENOMEM;
+	}
+
+	ret = sysfs_create_group(bln_kobject, &bln_interface_group);
+
+	if (ret) {
+		kobject_put(bln_kobject);
 	}
 
 #ifdef CONFIG_GENERIC_BLN_USE_WAKELOCK
